@@ -1,0 +1,608 @@
+---
+title: "Measuring Senior Independence in Canada"
+subtitle: "A Survey-Weighted Comparison of ADL and IADL Definitions"
+author: "Analysts: Parsa Alishahi, Radin Khansari, and Soha Shokravi |
+         Researcher: Sue Kang | Supervisor: Richard Lockhart"
+date: "October 13, 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(survey)
+library(tidyverse)
+```
+
+# 1.Introduction
+How independence is defined can affect our understanding of seniors’
+everyday functioning. Activities of Daily Living (ADL) refer to basic
+personal activities, such as eating, dressing, bathing, and toileting.
+Instrumental Activities of Daily Living (IADL) refer to tasks involved
+in managing everyday life, such as using a telephone, doing housework,
+arranging transportation, and preparing meals. A senior may manage
+personal care without help while receiving assistance with other daily
+tasks.
+
+This project uses selected variables from the Canadian Health Survey on
+Seniors (CHSS) public-use microdata to examine the question: **How does
+the estimated proportion of seniors classified as independent differ
+under two definitions based on ADL and IADL-related items?** The project
+dataset combines telephone-use questions from the Instrumental
+Activities of Daily Living module with assistance-received questions
+from the Care Receiving 2 module.
+
+For this analysis, the ADL-based definition classifies respondents as
+independent if they report receiving no assistance with personal care.
+The IADL-based definition classifies respondents as independent if they
+can use the telephone without help and report receiving no assistance
+with medical care, housework, transportation, or meal preparation.
+These are project-specific classifications based on selected items.
+Receiving no assistance does not necessarily mean that assistance is
+not needed, so the classifications should not be interpreted as
+complete assessments of the ability to live independently.
+
+We apply both definitions to the same respondents whose classifications
+can be determined. Survey weights are used to estimate population
+proportions, and bootstrap replicate weights are used to calculate
+standard errors and 95% confidence intervals. The analysis compares the
+two proportions and their paired difference to show how the choice of
+definition affects the estimated prevalence of independence.
+
+# 2.Data
+
+This project uses a selected subset of the **Canadian Health Survey on
+Seniors (CHSS) public-use microdata file**. The project dataset,
+`adl_data.csv`, was created from `pumf_chss.csv.gz` by selecting
+variables related to daily activities, assistance received, respondent
+characteristics, and survey weights.
+
+### Population coverage
+
+The analysis focuses on **adults aged 65 and older covered by the
+survey**. The survey excludes people living on reserves and other
+Indigenous settlements in the provinces, full-time members of the
+Canadian Forces, institutionalized individuals, and residents of Nunavik
+and Terres-Cries-de-l-Baie-James in Quebec. The findings therefore
+should not be generalized to these excluded populations.
+
+### Variables used
+
+The comparison uses telephone ability from the **Instrumental Activities
+of Daily Living (`IAL`) module** and assistance received because of a
+health condition or limitation from the **Care Receiving 2 (`CR2`)
+module**.
+
+| Variable | Description | Role in this project |
+|------------------------|------------------------|------------------------|
+| `WTS_CM` | Full-sample survey weight | Used to estimate population proportions |
+| `ADM_RNO2` | Respondent identifier | Links respondent records to bootstrap weights |
+| `GEOGPRV` | Province of residence | Retained for potential provincial comparisons |
+| `CR2_01AA` | Assistance received with personal care, such as eating, dressing, bathing, or toileting | Used in the ADL-based classification |
+| `CR2_01AB` | Assistance received with medical care | Used in the IADL-based classification |
+| `IAL_01A` | Ability to use the telephone without help | Used in the IADL-based classification |
+| `IAL_01B` | Ability to use the telephone with some help | Retained to understand the telephone-use response sequence |
+| `IAL_01C` | Unable to use the telephone | Retained to understand the telephone-use response sequence |
+| `CR2_01AD` | Assistance received with housework or home maintenance | Used in the IADL-based classification |
+| `CR2_01AE` | Assistance received with transportation | Used in the IADL-based classification |
+| `CR2_01AF` | Assistance received with meal preparation or delivery | Used in the IADL-based classification |
+
+The dataset also includes province, sex at birth, household size,
+proxy-response status, and additional care-related variables. These
+variables may support further analyses but are not used to construct the
+two primary classifications.
+
+### Survey weights and analysis sample
+
+The separate file, `chss_ecsa_bsw.csv.gz`, contains the **bootstrap
+replicate weights**. These are joined to the respondent data using
+`ADM_RNO2`. Full-sample weights determine each respondent's contribution
+to the population estimates, while bootstrap replicate weights are used
+to estimate sampling uncertainty.
+
+Some responses contain special codes, including "Don't know," "Refusal,"
+"Not stated," and "Valid skip." These are interpreted according to their
+meaning and the questionnaire structure. The primary comparison includes
+respondents for whom **both the ADL-based and IADL-based classifications
+can be determined**, ensuring that the two estimates use the same
+analysis sample. The coding rules and treatment of unresolved responses
+are described in the Methods section.
+
+# 3.Methods
+
+### Data preparation
+
+The analysis was conducted in **R** using the `tidyverse` package for
+data preparation and the `survey` package for survey-weighted
+estimation. Selected variables were given descriptive names, and
+categorical responses were labelled to make their meanings clear.
+
+```{r prepare-data, results='hide'}
+# Read the respondent data.
+data_raw <- read.csv("Data/adl_data.csv")
+
+variables <- c(
+  "WTS_CM", "ADM_RNO2", "GEOGPRV",
+  "CR2_01AA", "CR2_01AB",
+  "IAL_01A", "IAL_01B", "IAL_01C",
+  "CR2_01AD", "CR2_01AE", "CR2_01AF"
+)
+
+# Stop if required columns are missing.
+missing_variables <- setdiff(variables, names(data_raw))
+
+if (length(missing_variables) > 0) {
+  stop(
+    "Missing required variables: ",
+    paste(missing_variables, collapse = ", ")
+  )
+}
+
+# Preserve the original dataset and create the analysis dataset.
+data <- data_raw |>
+  select(all_of(variables)) |>
+  rename(
+    weight = WTS_CM,
+    province = GEOGPRV,
+    personal_care = CR2_01AA,
+    medical_care = CR2_01AB,
+    telephone_wout_help = IAL_01A,
+    telephone_w_help = IAL_01B,
+    unable_use_telephone = IAL_01C,
+    housework = CR2_01AD,
+    transportation = CR2_01AE,
+    meal_prep = CR2_01AF
+  )
+
+# Label responses while and check for unexpected codes.
+label_response <- function(x, codes, labels) 
+{
+  unexpected <- setdiff(unique(x[!is.na(x)]), codes)
+
+  if (length(unexpected) > 0) {
+    stop(
+      "Unexpected response codes: ",
+      paste(unexpected, collapse = ", "),
+      ". Check the data dictionary before continuing."
+    )
+  }
+
+  factor(x, levels = codes, labels = labels)
+}
+
+# Now the coded values are converted to their labels
+# Label province of residence.
+data$province <- label_response(
+  data$province,
+  codes = c(10, 11, 12, 13, 24, 35, 46, 47, 48, 59),
+  labels = c(
+    "Newfoundland and Labrador", "Prince Edward Island",
+    "Nova Scotia", "New Brunswick", "Quebec", "Ontario",
+    "Manitoba", "Saskatchewan", "Alberta", "British Columbia"
+  )
+)
+
+# These six variables share the same response codes and labels.
+response_codes <- c(1, 2, 7, 8)
+response_labels <- c("yes", "No", "Don't know", "refusal")
+
+data$personal_care <- label_response(
+  data$personal_care,
+  codes = response_codes, labels = response_labels
+)
+
+data$medical_care <- label_response(
+  data$medical_care,
+  codes = response_codes, labels = response_labels
+)
+
+data$telephone_wout_help <- label_response(
+  data$telephone_wout_help,
+  codes = response_codes, labels = response_labels
+)
+
+data$housework <- label_response(
+  data$housework,
+  codes = response_codes, labels = response_labels
+)
+
+data$transportation <- label_response(
+  data$transportation,
+  codes = response_codes, labels = response_labels
+)
+
+data$meal_prep <- label_response(
+  data$meal_prep,
+  codes = response_codes, labels = response_labels
+)
+
+# Preserve valid skips in the telephone follow-up questions.
+data$telephone_w_help <- label_response(
+  data$telephone_w_help,
+  codes = c(1, 2, 6, 7, 8, 9),
+  labels = c(
+    "yes", "No", "Valid skip", "Don't know", "refusal", "Not stated"
+  )
+)
+
+data$unable_use_telephone <- label_response(
+  data$unable_use_telephone,
+  codes = c(1, 2, 6, 7, 9),
+  labels = c(
+    "yes", "No", "Valid skip", "Don't know", "Not stated"
+  )
+)
+
+
+```
+
+The respondent dataset was joined to the bootstrap replicate-weight file
+using `ADM_RNO2`, the respondent identifier.
+
+```{r join-weights, results='hide'}
+# Read the bootstrap replicate-weight file.
+bsw <- read.csv("Data/chss_ecsa_bsw.csv.gz")
+
+# Match each respondent to their weights using the respondent ID.
+alldata <- dplyr::left_join(data, bsw, by = "ADM_RNO2")
+
+# Count columns named BSW followed by digits, such as BSW1 or BSW2.
+length(grep("^BSW[0-9]+$", names(alldata)))
+
+# Store the replicate-weight column names for the survey design.
+rep_names <- grep("^BSW[0-9]+$", names(alldata), value = TRUE)
+```
+
+
+### Defining independence
+
+Two binary indicators were constructed using selected survey items. For
+each indicator, **1 represents classification as independent** and **0
+represents classification as not independent** under the project's
+definition.
+
+**ADL-based classification**
+
+Respondents were classified as independent if they reported receiving
+no assistance with personal care. They were classified as not
+independent if they reported receiving assistance with personal care.
+
+**IADL-based classification**
+
+Respondents were classified as independent if they could use the
+telephone without help and reported receiving no assistance with
+medical care, housework, transportation, or meal preparation. They were
+classified as not independent if they could not use the telephone
+without help or reported receiving assistance with at least one of
+these activities.
+
+These classifications are based on selected items rather than complete
+ADL or IADL scales. In particular, **not receiving assistance does not
+necessarily mean that assistance is not needed**.
+
+```{r independence-indicators}
+# Create independence indicators: 1 = independent, 0 = not independent.
+alldata <- alldata |>
+  mutate(
+    # ADL: personal care only.
+    ADL_independent = case_when(
+      personal_care == "yes" ~ 0,
+      personal_care == "No" ~ 1,
+      TRUE ~ NA_real_
+    ),
+
+    # IADL: telephone ability and assistance received with
+    # medical care, housework, transportation, and meal preparation.
+    IADL_independent = case_when(
+      telephone_wout_help == "No" |
+        medical_care == "yes" |
+        housework == "yes" |
+        transportation == "yes" |
+        meal_prep == "yes" ~ 0,
+
+      telephone_wout_help == "yes" &
+        medical_care == "No" &
+        housework == "No" &
+        transportation == "No" &
+        meal_prep == "No" ~ 1,
+
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+
+### Unresolved responses and valid skips
+
+Responses such as "Don't know" and "Refusal" were not treated as
+substantive yes or no answers. A classification was recorded as missing
+when the available responses were insufficient to determine it.
+
+A respondent could still be classified as not independent if one item
+established assistance received or inability to use the telephone
+without help, even when another item was unresolved. Classification as
+independent required all relevant items to meet the independence
+criteria.
+
+Valid skips in the telephone follow-up questions were retained as
+distinct categories. These follow-up questions were not used directly in
+either independence indicator.
+
+The primary comparison was restricted to respondents whose **ADL-based
+and IADL-based classifications were both available**. This ensured that
+both proportions were estimated using the same respondents. Excluding
+unresolved classifications may affect the estimates if excluded
+respondents differ systematically from those included.
+
+### Survey-weighted estimation
+
+A replicate-weight survey design was specified using `svrepdesign()`,
+with the full-sample weight `WTS_CM` renamed to `weight`. Bootstrap
+replicate-weight columns were identified by names matching
+`^BSW[0-9]+$`. The design used `type = "bootstrap"` and
+`combined.weights = TRUE`.
+
+```{r survey-design}
+# Specify the survey design using the full-sample and replicate weights.
+d.chss <- svrepdesign(
+  weights = ~weight,
+  repweights = alldata[, rep_names, drop = FALSE],
+  type = "bootstrap",
+  data = alldata,
+  combined.weights = TRUE
+)
+```
+
+proportion was estimated using `svymean()`. Because the indicators were coded as 0
+and 1, their weighted means represent weighted proportions.
+For each definition, the population proportion classified as independent
+
+```{r proportions}
+# Keep respondents whose classifications are available under both definitions.
+d.compare <- subset(
+  d.chss,
+  !is.na(ADL_independent) & !is.na(IADL_independent)
+)
+
+# Estimate the survey-weighted proportions.
+independence_estimates <- svymean(
+  ~ADL_independent + IADL_independent,
+  design = d.compare
+)
+
+# Record how many respondents are included and excluded.
+n_original <- nrow(data)
+n_analysis <- nrow(d.compare$variables)
+n_excluded <- n_original - n_analysis
+
+data.frame(
+  Original = n_original,
+  Included = n_analysis,
+  Excluded = n_excluded
+)|>knitr::kable()
+
+# Estimate both proportions using the same survey analysis sample.
+independence_estimates <- svymean(
+  ~ADL_independent + IADL_independent,
+  design = d.compare,
+  deff = TRUE
+)
+```
+
+Bootstrap replicate weights were used to estimate standard errors, and 95% 
+confidence intervals were obtained using `confint()`.
+
+```{r CI and result table}
+# Calculate 95% confidence intervals.
+confidence_interval <- confint(independence_estimates)
+
+# Keep the estimates and uncertainty together.
+results <- cbind(
+  as.data.frame(independence_estimates),
+  as.data.frame(confidence_interval)
+)
+
+# Display proportions as percentages and SEs as percentage points.
+results_table <- data.frame(
+  Definition = c("ADL", "IADL"),
+  Estimate = 100 * results$mean,
+  SE = 100 * results$SE,
+  Lower = 100 * confidence_interval[, 1],
+  Upper = 100 * confidence_interval[, 2]
+)
+
+knitr::kable(
+  results_table,
+  digits = 2,
+  row.names = FALSE,
+  col.names = c(
+    "Definition", "Estimate (%)", "SE (percentage points)",
+    "95% CI lower (%)", "95% CI upper (%)"
+  )
+)
+```
+
+
+### Paired comparison of definitions
+
+The primary contrast was the **ADL-based proportion minus the IADL-based
+proportion**. For each respondent, a difference indicator was calculated
+as:
+
+$$D_i = ADL_i - IADL_i.$$
+
+The survey-weighted mean of this indicator estimates the difference
+between the two proportions. Its standard error and 95% confidence
+interval were calculated using the replicate-weight design, accounting
+for the fact that both definitions were applied to the same respondents.
+
+The difference was multiplied by 100 and reported in **percentage
+points**. A positive value indicates a higher estimated proportion
+classified as independent under the ADL-based definition.
+
+```{r}
+# Calculate the difference for each respondent.
+d.compare <- update(
+  d.compare,
+  difference = ADL_independent - IADL_independent
+)
+
+# Estimate the survey-weighted paired difference.
+difference_estimate <- svymean(
+  ~difference,
+  design = d.compare
+)
+
+# Calculate the 95% confidence interval.
+difference_ci <- confint(difference_estimate)
+
+# Convert the estimate, SE, and confidence limits to percentage points.
+difference_table <- data.frame(
+  Comparison = "ADL-based minus IADL-based",
+  Difference = 100 * as.numeric(coef(difference_estimate)),
+  SE = 100 * as.numeric(SE(difference_estimate)),
+  Lower = 100 * difference_ci[1, 1],
+  Upper = 100 * difference_ci[1, 2]
+)
+
+# Display the results.
+knitr::kable(
+  difference_table,
+  digits = 2,
+  row.names = FALSE,
+  col.names = c(
+    "Comparison", "Difference", "SE",
+    "95% CI lower", "95% CI upper"
+  )
+)
+```
+
+
+### Scope of interpretation
+
+The analysis describes differences between two project-specific
+classifications. It does not establish causes of independence or
+determine whether an individual can live independently in every aspect
+of daily life. 
+
+# 4.Results
+
+### Independence under the two definitions
+
+Among respondents whose classifications could be determined under both
+definitions, an estimated **95.84%** were classified as independent under
+the ADL-based definition, compared with **83.36%** under the IADL-based
+definition.
+
+The 95% confidence interval was approximately **95.35% to 96.33%** for
+the ADL-based estimate and **82.59% to 84.13%** for the IADL-based
+estimate. The corresponding standard errors were approximately
+**0.20 and 0.38 percentage points**, respectively.
+
+### Difference between definitions
+
+The estimated proportion classified as independent was **12.48 percentage 
+points higher** under the ADL-based definition. Both definitions were applied to the 
+same respondents, and uncertainty in the difference was estimated using a 
+paired, survey-weighted analysis.
+
+These results show that the selected definition affects the estimated
+prevalence of independence. They do not establish that either definition
+provides a complete assessment of seniors' ability to live independently.
+
+### Overlap between ADL and IADL classifications
+
+The overlap table shows the estimated percentage of seniors classified
+as independent under both definitions, under ADL only, under IADL only,
+or under neither definition. All percentages use the same comparison
+population as the denominator and sum to 100% before rounding.
+
+```{r overlap-table}
+# Classify respondents into the four combinations.
+d.compare <- update(
+  d.compare,
+  overlap = factor(
+    case_when(
+      ADL_independent == 1 & IADL_independent == 1 ~ "Independent under both",
+      ADL_independent == 1 & IADL_independent == 0 ~ "Independent under ADL only",
+      ADL_independent == 0 & IADL_independent == 1 ~ "Independent under IADL only",
+      TRUE ~ "Not independent under either"
+    ),
+    levels = c(
+      "Independent under both",
+      "Independent under ADL only",
+      "Independent under IADL only",
+      "Not independent under either"
+    )
+  )
+)
+
+# Estimate the weighted proportions and 95% confidence intervals.
+overlap_est <- svymean(~overlap, design = d.compare)
+overlap_ci <- confint(overlap_est)
+
+# Express the proportions and uncertainty in percentage units.
+overlap_table <- data.frame(
+  Group = levels(d.compare$variables$overlap),
+  Estimate = 100 * as.numeric(coef(overlap_est)),
+  SE = 100 * as.numeric(SE(overlap_est)),
+  Lower = 100 * overlap_ci[, 1],
+  Upper = 100 * overlap_ci[, 2]
+)
+
+knitr::kable(
+  overlap_table,
+  digits = 2,
+  row.names = FALSE,
+  col.names = c(
+    "Group", "Estimate (%)", "SE (percentage points)",
+    "95% CI lower (%)", "95% CI upper (%)"
+  )
+)
+```
+
+### Effect of survey weighting and design
+
+The unweighted ADL-based proportion was approximately **95.23%**,
+compared with the survey-weighted estimate of approximately **94.87%**.
+Weighting therefore made a relatively small difference to the point
+estimate.
+
+However, the survey-based standard error was approximately **1.9 times**
+the ordinary standard error calculated assuming independent, equally
+weighted respondents. Ignoring the survey design would therefore
+understate uncertainty in this comparison.
+
+# 5.Discussion
+
+### Main findings
+
+The comparison examines how the estimated proportion of seniors
+classified as independent changes when using an ADL-based definition
+focused on personal care versus an IADL-based definition covering
+telephone ability and assistance received with medical care, housework,
+transportation, and meal preparation.
+
+A lower IADL-based estimate would indicate that fewer seniors meet all
+the selected IADL criteria than the personal-care criterion used for
+ADL. However, the two overall proportions alone do not show which
+activities contribute most to the difference or how often individual
+respondents receive different classifications.
+
+### Limitations
+
+The comparison includes only respondents whose classifications could
+be determined under both definitions. If excluded respondents differ
+systematically from those included, the estimates may not fully
+represent the intended survey population.
+
+The findings also apply only to the population covered by the survey.
+They do not represent excluded populations, including institutionalized
+seniors. Finally, this descriptive analysis does not establish causes
+of independence or explain why respondents receive assistance.
